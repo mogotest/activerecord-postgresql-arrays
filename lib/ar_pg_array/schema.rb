@@ -1,22 +1,24 @@
 module ActiveRecord
   module ConnectionAdapters
-    class PostgreSQLColumn < Column #:nodoc:
+    class PostgreSQLColumn #:nodoc:
       BASE_TYPE_COLUMNS = Hash.new{|h, base_type| 
         base_column= new(nil, nil, base_type.to_s, true)
         h[base_type] = h[base_column.type]= base_column
       }
       attr_reader :base_column
-    
+
+      alias_method :initialize_orig, :initialize
       def initialize(name, default, sql_type = nil, null = true)
-        if sql_type =~ /^(.+)\[\]$/
+        if sql_type =~ /^(.+)\[\]$/ || sql_type =~ /^_(.+)$/
           @base_sql_type = $1
           @base_column = BASE_TYPE_COLUMNS[@base_sql_type]
         end
-        super(name, self.class.extract_value_from_default(default), sql_type, null)
+
+        initialize_orig(name, default, sql_type, null)
       end
       
       def simplified_type_with_postgresql_arrays(field_type)
-        if field_type=~/^(.+)\[\]$/
+        if field_type=~/^(.+)\[\]$/ || field_type =~ /^_(.+)$/
           :"#{simplified_type_without_postgresql_arrays($1)}_array"
         else
           simplified_type_without_postgresql_arrays(field_type)
@@ -24,14 +26,16 @@ module ActiveRecord
       end
       alias_method_chain :simplified_type, :postgresql_arrays
 
+      alias_method :klass_orig, :klass
       def klass
         if type.to_s =~ /_array$/
           Array
         else
-          super
+          klass_orig
         end
       end
 
+      alias_method :type_cast_orig, :type_cast
       def type_cast(value)
         return nil if value.nil?
         case type
@@ -43,10 +47,11 @@ module ActiveRecord
             string_to_array(value)
           when :text_array, :string_array
             self.class.string_to_text_array(value)
-          else super
+          else type_cast_orig(value)
         end
       end
-      
+
+      alias_method :type_cast_code_orig, :type_cast_code
       def type_cast_code(var_name)
         case type
           when :integer_array, :float_array
@@ -57,7 +62,7 @@ module ActiveRecord
             "#{self.class.name}.string_to_array(#{var_name}, #{@base_sql_type.inspect})"
           when :text_array, :string_array
             "#{self.class.name}.string_to_text_array(#{var_name})"
-          else super
+          else type_cast_code_orig(var_name)
         end
       end
       
@@ -123,7 +128,7 @@ module ActiveRecord
       end
     end
     
-    class PostgreSQLAdapter #:nodoc:
+    class AbstractAdapter #:nodoc:
       def quote_with_postgresql_arrays(value, column = nil)
         if Array === value && column && "#{column.type}" =~ /^(.+)_array$/
           quote_array_by_base_type(value, $1, column)
@@ -216,7 +221,24 @@ module ActiveRecord
         }.join(',')
         "{#{value}}"
       end
-      
+
+      NATIVE_DATABASE_TYPES = {
+          :primary_key => "serial primary key",
+          :string      => { :name => "character varying", :limit => 255 },
+          :text        => { :name => "text" },
+          :integer     => { :name => "integer" },
+          :float       => { :name => "float" },
+          :decimal     => { :name => "decimal" },
+          :datetime    => { :name => "timestamp" },
+          :timestamp   => { :name => "timestamp" },
+          :time        => { :name => "time" },
+          :date        => { :name => "date" },
+          :binary      => { :name => "bytea" },
+          :boolean     => { :name => "boolean" },
+          :xml         => { :name => "xml" },
+          :tsvector    => { :name => "tsvector" }
+      }
+
       NATIVE_DATABASE_TYPES.keys.each do |key|
         unless key==:primary_key
           base = NATIVE_DATABASE_TYPES[key].dup
